@@ -40,7 +40,7 @@ An intelligent solution that leverages Large Language Models to automatically an
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/Bilalshah1/LLM-powered-issue-resolver.git
+   git clone https://github.com/Hassanahmed52/LLM-powered-code-issue-resolver.git
    cd LLM-powered-issue-resolver
    ```
 
@@ -78,11 +78,3 @@ An intelligent solution that leverages Large Language Models to automatically an
 3. **Get Analysis**: The LLM analyzes your issue and provides categorization
 4. **View Solutions**: Receive intelligent suggestions and step-by-step resolutions
 5. **Track History**: Access your previous issues and solutions
-
-
-
-
-
----
-
-⭐ If you found this project helpful, please give it a star!
