@@ -295,6 +295,15 @@ async function embedFiles(repoName, repoPath) {
 
 // ─── ROUTES ───────────────────────────────────────────────────────────────────
 
+app.get("/", (req, res) => {
+  res.json({
+    name: "LLM Code Issue Resolver API",
+    status: "running",
+    health: "/health"
+  });
+});
+
+
 app.get('/api/repos', async (req, res) => {
   try {
     const clonedReposPath = path.join(__dirname, 'cloned_repos');

@@ -1,23 +1,20 @@
 FROM node:18-alpine
+
 WORKDIR /app
 
-# Install production dependencies
+# Install git because backend clones repositories
+RUN apk add --no-cache git
+
+# Install dependencies
 COPY package*.json ./
 RUN npm ci --production
 
-# Copy source
+# Copy application code
 COPY . .
 
-# Use an unprivileged port for Cloud Run
+# Railway provides PORT automatically, this is fallback
 ENV PORT=8080
+
 EXPOSE 8080
 
-CMD ["node", "server.js"]
-FROM node:18-alpine
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci --production
-COPY . .
-ENV PORT 8080
-EXPOSE 8080
 CMD ["node", "server.js"]
