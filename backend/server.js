@@ -279,6 +279,7 @@ async function embedFiles(repoName, repoPath) {
 
   console.log(`Uploading ${points.length} embeddings to Qdrant...`);
 
+  console.log("Vector length:", points[0].vector.length);
   const baseId = Date.now();
   await qdrant.upsert(COLLECTION_NAME, {
     wait: true,

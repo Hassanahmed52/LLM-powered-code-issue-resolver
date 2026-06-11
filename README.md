@@ -1,112 +1,63 @@
-# LLM-powered Issue Resolver
+# LLM-powered Issue Resolver — Deployed Instances
 
-An intelligent solution that leverages Large Language Models to automatically analyze, categorize, and provide resolutions for software issues and support tickets.
+The project is deployed and verified at the following production URLs (as requested):
 
-##  Live Demo
+- Frontend (Firebase): https://llm-code-resolver.web.app
+- Backend API (Railway): https://llm-issue-resolver-production.up.railway.app
 
-**[View Live Application](https://saas-project-8e6a7.firebaseapp.com/)**
+This README focuses on the deployed application usage and verification steps. Local development instructions are intentionally omitted per request.
 
-##  Features
+## What I verified (live checks)
+- Frontend homepage loads and navigation links are present.
+- Backend `/health` responded: `{ "status": "Server is running", "timestamp": "..." }`.
+- Backend `/api/test-embedding-status` returned a sample embedding vector and confirmed embedding model connectivity.
+- Backend `/api/repos` returned at least one cloned repository (example: `CineSpot`).
+- Backend `/api/solve-issue` returned an LLM-generated solution for a simple test issue.
 
-- **Intelligent Issue Analysis**: Automatically categorizes and analyzes issues using LLM
-- **Smart Resolution Suggestions**: Provides context-aware solutions and recommendations
-- **Real-time Processing**: Fast issue processing and response generation
-- **User Authentication**: Secure login and user management
-- **Responsive Design**: Works seamlessly across desktop and mobile devices
+All checks were performed against the deployed endpoints on 2026-06-11.
 
-##  Tech Stack
+## How to use the deployed app
 
-### Frontend
-- **Framework**: React.js
-- **Hosting**: Firebase Hosting
-- **Authentication**: Firebase Auth
-- **Styling**: CSS/Tailwind CSS
+1. Open the frontend in your browser:
 
-### Backend
-- **Runtime**: Node.js
-- **Framework**: Express.js
-- **Deployment**: Render
-- **LLM Integration**: OpenAI API / Anthropic API
+	https://llm-code-resolver.web.app
 
-##  Installation & Setup
+2. Sign in or sign up (if required by the app) and go to the **Connect** page.
+	- Paste a public GitHub repository HTTPS URL and click **Clone Repo**.
+	- After cloning, you should be redirected to the **Issue** page.
 
-### Prerequisites
-- Node.js (v16 or higher)
-- npm or yarn
-- Firebase account
-- OpenAI/Anthropic API key
+3. On the **Issue** page:
+	- Select the cloned repository (from the repo list).
+	- Enter a short issue description and submit.
+	- You will be shown a generated solution on the **Solution** page.
 
-### Local Development
+## Quick API checks (curl)
+Use these commands to verify the deployed backend manually:
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/Hassanahmed52/LLM-powered-code-issue-resolver.git
-   cd LLM-powered-code-issue-resolver
-   ```
+```bash
+# Health
+curl -sS https://llm-issue-resolver-production.up.railway.app/health
 
-2. **Install dependencies**
-   ```bash
-   # Install frontend dependencies
-   cd frontend
-   npm install
-   
-   # Install backend dependencies
-   cd ../backend
-   npm install
-   ```
+# Embedding test
+curl -sS https://llm-issue-resolver-production.up.railway.app/api/test-embedding-status
 
-3. **Create secret config files**
-   - Copy `frontend/.env.example` to `frontend/.env.local`
-   - Copy `backend/.env.example` to `backend/.env`
+# Repo list
+curl -sS https://llm-issue-resolver-production.up.railway.app/api/repos
 
-4. **Run the application locally**
-   ```bash
-   # Start backend server
-   cd backend
-   npm start
-   
-   # In another terminal, start frontend
-   cd ../frontend
-   npm run dev
-   ```
+# Solve an issue (example)
+curl -sS -X POST https://llm-issue-resolver-production.up.railway.app/api/solve-issue \
+  -H "Content-Type: application/json" \
+  -d '{"issue":"How to run the project","repoName":"CineSpot","topK":3}'
+```
 
-##  Deployment
+## Troubleshooting (deployed)
 
-### Frontend (Firebase)
+- If `/api/test-embedding-status` returns an error, check provider quotas (OpenAI/Groq) and whether the backend has valid API keys configured in Railway environment variables.
+- If cloning fails for a repo, the backend will return the clone error; verify the provided repo URL is public or that the backend has a valid `GIT_AUTH_TOKEN` configured in Railway for private repos.
+- If the `/api/solve-issue` request returns `429`, the backend has rate-limit retry logic; retry after a short wait or check your LLM provider usage quota.
 
-1. Build and export the frontend for Firebase Hosting:
-   ```bash
-   cd frontend
-   npm run export
-   ```
-2. Deploy to Firebase Hosting:
-   ```bash
-   npm run deploy:firebase
-   ```
-   If the CLI is not installed globally, install it with `npm install -g firebase-tools` or use the local script.
-3. If you have a backend, host it separately (Cloud Run, Render, or Firebase Functions) and set `NEXT_PUBLIC_API_BASE_URL` to its public URL in `frontend/.env.local`.
+## Notes
 
-### Backend
+- I verified the live deployment responses on 2026-06-11. The service is live and responds to the primary flows (clone → list → solve). If you want, I can add a short automated smoke-test script under `/scripts` to run these checks programmatically.
 
-The backend must run on a separate Node.js host. You can deploy it to Render, Google Cloud Run, or Firebase Functions.
-
-- Put your secrets in `backend/.env` only.
-- Do not commit `backend/.env` or `frontend/.env.local` to git.
-- Use the `backend/.env.example` file as a reference.
-
-##  Secrets and config files
-
-This repository includes example environment files so you can restore secrets safely.
-
-- `frontend/.env.example` contains the public API base URL used by the frontend.
-- `backend/.env.example` contains backend keys and service URLs.
-
-When you deploy, keep the real credentials in your infrastructure's secret manager or in local `.env` files that are not committed.
-
-##  Usage
-
-1. **Sign Up/Login**: Create an account or login using Firebase Authentication
-2. **Submit Issue**: Describe your technical issue or problem
-3. **Get Analysis**: The LLM analyzes your issue and provides categorization
-4. **View Solutions**: Receive intelligent suggestions and step-by-step resolutions
-5. **Track History**: Access your previous issues and solutions
+If you'd like the README adjusted further (remove local instructions entirely, add API contract details, or add automated checks), tell me which format you prefer and I'll update it.
