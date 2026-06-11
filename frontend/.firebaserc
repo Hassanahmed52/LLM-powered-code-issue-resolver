@@ -1,5 +1,7 @@
 {
   "projects": {
-    "default": "saas-project-8e6a7"
-  }
+    "default": "llm-code-resolver"
+  },
+  "targets": {},
+  "etags": {}
 }

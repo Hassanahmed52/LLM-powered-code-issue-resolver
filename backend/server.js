@@ -9,19 +9,43 @@ const crypto = require('crypto');
 const Groq = require('groq-sdk');
 const nodemailer = require('nodemailer');
 const bodyParser = require('body-parser');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-require('dotenv').config();
+require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 
+// ─── ENV SETUP ───────────────────────────────────────────────────────────────
 
-
-const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
+const rawQdrantUrl = (process.env.QDRANT_URL || 'http://localhost:6333').trim();
+if (rawQdrantUrl.includes('|')) {
+  console.warn(
+    'WARNING: QDRANT_URL contains more than one value separated by "|". Using the first URL only.'
+  );
+}
+const QDRANT_URL = rawQdrantUrl.split(/\s*\|\s*/).find(Boolean)?.trim() || 'http://localhost:6333';
 const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const HF_API_KEY = process.env.HF_API_KEY; // Hugging Face API key (free tier)
+
+if (!GROQ_API_KEY) {
+  console.error("ERROR: GROQ_API_KEY is missing.");
+  process.exit(1);
+}
+
+if (!HF_API_KEY) {
+  console.error("ERROR: HF_API_KEY is missing. Get a free key at https://huggingface.co/settings/tokens");
+  process.exit(1);
+}
+
+try {
+  new URL(QDRANT_URL);
+} catch (urlError) {
+  console.error(`ERROR: QDRANT_URL is invalid: ${QDRANT_URL}`);
+  process.exit(1);
+}
+
+console.log(`Using Qdrant URL: ${QDRANT_URL}`);
 
 const qdrant = new QdrantClient({
   url: QDRANT_URL,
@@ -29,36 +53,107 @@ const qdrant = new QdrantClient({
   checkCompatibility: false
 });
 
-const groq = new Groq({
-  apiKey: GROQ_API_KEY,
-});
-
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+const groq = new Groq({ apiKey: GROQ_API_KEY });
 
 console.log('Qdrant URL:', QDRANT_URL);
 console.log('Qdrant API Key:', QDRANT_API_KEY ? 'Present' : 'Not present');
 console.log('Groq API Key:', GROQ_API_KEY ? 'Present' : 'Not present');
-console.log('Gemini API Key:', GEMINI_API_KEY ? 'Present' : 'Not present');
+console.log('HuggingFace API Key:', HF_API_KEY ? 'Present' : 'Not present');
 console.log("CORS enabled for all origins");
 
-const CHUNK_CONFIG = {
-  maxChunkSize: 1000,
-  overlapSize: 100,
-  minChunkSize: 50
-};
+// ─── EMBEDDING via Hugging Face (free, 384 dimensions, all-MiniLM-L6-v2) ─────
+
+const HF_MODEL = "sentence-transformers/all-MiniLM-L6-v2";
+const VECTOR_SIZE = 384;
+
+async function getEmbedding(text, retries = 5) {
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const response = await axios.post(
+        `https://router.huggingface.co/hf-inference/models/${HF_MODEL}/pipeline/feature-extraction`,
+        { inputs: text },
+        {
+          headers: {
+            Authorization: `Bearer ${HF_API_KEY}`,
+            "Content-Type": "application/json"
+          },
+          timeout: 30000
+        }
+      );
+
+      // HF returns a nested array [[...embeddings...]]
+      const data = response.data;
+      let vector;
+
+      if (Array.isArray(data) && Array.isArray(data[0])) {
+        // Sentence-transformers returns [[vec]] — take first item
+        vector = data[0];
+      } else if (Array.isArray(data)) {
+        vector = data;
+      } else {
+        throw new Error("Unexpected HuggingFace response format");
+      }
+
+      return vector;
+    } catch (error) {
+      const statusCode = error.response?.status;
+      const errorMsg = error.response?.data?.error || error.message;
+
+      console.error(`HF Embedding error (attempt ${attempt + 1}/${retries}): ${statusCode} - ${errorMsg}`);
+
+      // Model is loading — wait and retry
+      if (statusCode === 503) {
+        const waitTime = (error.response?.data?.estimated_time || 20) * 1000;
+        console.log(`Model loading, waiting ${waitTime / 1000}s...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        continue;
+      }
+
+      if (statusCode === 401 || statusCode === 403) {
+        throw new Error(`HuggingFace auth error: ${statusCode} - Check HF_API_KEY`);
+      }
+
+      if (attempt < retries - 1) {
+        const delayMs = Math.pow(2, attempt) * 1000;
+        console.log(`Retrying in ${delayMs}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+        continue;
+      }
+
+      throw error;
+    }
+  }
+}
+
+// ─── FILE UTILITIES ───────────────────────────────────────────────────────────
 
 function shouldEmbedFile(filePath) {
-  const skipExtensions = ['.git', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.svg', '.pdf', '.zip', '.tar', '.gz', '.exe', '.dll', '.bin', '.so', '.dylib'];
-  const skipDirs = ['.git', 'node_modules', '.vscode', '.idea', 'target', 'build', 'dist', 'bin', '__pycache__'];
+  const skipExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.ico', '.svg', '.pdf',
+    '.zip', '.tar', '.gz', '.exe', '.dll', '.bin', '.so', '.dylib'];
+  const skipDirs = ['.git', 'node_modules', '.vscode', '.idea', 'target',
+    'build', 'dist', 'bin', '__pycache__'];
 
   for (const skipDir of skipDirs) {
-    if (filePath.includes(`${path.sep}${skipDir}${path.sep}`) || filePath.includes(`${path.sep}${skipDir}`)) {
+    if (filePath.includes(`${path.sep}${skipDir}${path.sep}`) ||
+        filePath.includes(`${path.sep}${skipDir}`)) {
       return false;
     }
   }
 
   const ext = path.extname(filePath).toLowerCase();
   return !skipExtensions.includes(ext);
+}
+
+function getAllFiles(dir, files = []) {
+  fs.readdirSync(dir).forEach(file => {
+    const fullPath = path.join(dir, file);
+    if (fs.statSync(fullPath).isDirectory()) {
+      getAllFiles(fullPath, files);
+    } else if (shouldEmbedFile(fullPath)) {
+      files.push(fullPath);
+    }
+  });
+  return files;
 }
 
 function extractNotebookContent(notebookContent) {
@@ -69,43 +164,12 @@ function extractNotebookContent(notebookContent) {
     notebook.cells.forEach((cell, index) => {
       if (cell.cell_type === 'markdown' && cell.source) {
         extractedText += `\n## Markdown Cell ${index + 1}\n`;
-        if (Array.isArray(cell.source)) {
-          extractedText += cell.source.join('');
-        } else {
-          extractedText += cell.source;
-        }
+        extractedText += Array.isArray(cell.source) ? cell.source.join('') : cell.source;
         extractedText += '\n';
       } else if (cell.cell_type === 'code' && cell.source) {
         extractedText += `\n## Code Cell ${index + 1}\n`;
-        if (Array.isArray(cell.source)) {
-          extractedText += cell.source.join('');
-        } else {
-          extractedText += cell.source;
-        }
+        extractedText += Array.isArray(cell.source) ? cell.source.join('') : cell.source;
         extractedText += '\n';
-
-        if (cell.outputs && Array.isArray(cell.outputs)) {
-          cell.outputs.forEach((output, outputIndex) => {
-            if (output.text || output.data) {
-              extractedText += `\n### Output ${outputIndex + 1}\n`;
-              if (output.text) {
-                if (Array.isArray(output.text)) {
-                  extractedText += output.text.join('');
-                } else {
-                  extractedText += output.text;
-                }
-              }
-              if (output.data && output.data['text/plain']) {
-                if (Array.isArray(output.data['text/plain'])) {
-                  extractedText += output.data['text/plain'].join('');
-                } else {
-                  extractedText += output.data['text/plain'];
-                }
-              }
-              extractedText += '\n';
-            }
-          });
-        }
       }
     });
   }
@@ -114,273 +178,41 @@ function extractNotebookContent(notebookContent) {
 }
 
 function cleanTextForEmbedding(text) {
-  if (!text || typeof text !== 'string') {
-    return null;
-  }
+  if (!text || typeof text !== 'string') return null;
 
   let cleaned = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
-  cleaned = cleaned.trim();
+  cleaned = cleaned.replace(/\n{3,}/g, '\n\n').trim();
 
-  if (cleaned.length < 10 || cleaned.length > 50000) {
-    return null;
-  }
+  if (cleaned.length < 10 || cleaned.length > 50000) return null;
 
   cleaned = cleaned.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
-
   return cleaned;
 }
 
-function getAllFiles(dir, files = []) {
-  console.log(`Reading directory: ${dir}`);
-  fs.readdirSync(dir).forEach(file => {
-    const fullPath = path.join(dir, file);
-    if (fs.statSync(fullPath).isDirectory()) {
-      getAllFiles(fullPath, files);
-    } else {
-      if (shouldEmbedFile(fullPath)) {
-        files.push(fullPath);
-      }
-    }
-  });
-  return files;
-}
-
-function chunkText(text, filePath) {
-  const chunks = [];
-  const fileExtension = path.extname(filePath).toLowerCase();
-
-  const isCodeFile = ['.js', '.ts', '.py', '.java', '.cpp', '.c', '.cs', '.php', '.rb', '.go', '.rs'].includes(fileExtension);
-
-  let splitPatterns;
-  if (isCodeFile) {
-    splitPatterns = [
-      /\n\s*(?:function|class|def|public|private|protected|interface|struct|enum)\s+/,
-      /\n\s*\/\*[\s\S]*?\*\/\s*\n/,
-      /\n\s*\/\/.*\n/,
-      /\n\s*\n\s*\n/,
-      /\n\s*\}\s*\n/,
-      /\.\s+/,
-      /\n/
-    ];
-  } else {
-    splitPatterns = [
-      /\n\s*\n/,
-      /\.\s+/,
-      /!\s+/,
-      /\?\s+/,
-      /;\s+/,
-      /\n/
-    ];
-  }
-
-  let remainingText = text;
-  let currentChunk = '';
-  let chunkIndex = 0;
-
-  while (remainingText.length > 0) {
-    if (remainingText.length <= CHUNK_CONFIG.maxChunkSize) {
-      if (currentChunk) {
-        chunks.push({
-          text: currentChunk + remainingText,
-          index: chunkIndex,
-          startChar: text.length - remainingText.length - currentChunk.length,
-          endChar: text.length
-        });
-      } else if (remainingText.trim().length >= CHUNK_CONFIG.minChunkSize) {
-        chunks.push({
-          text: remainingText,
-          index: chunkIndex,
-          startChar: text.length - remainingText.length,
-          endChar: text.length
-        });
-      }
-      break;
-    }
-
-    let bestSplit = -1;
-    let bestSplitPattern = null;
-
-    for (const pattern of splitPatterns) {
-      const matches = Array.from(remainingText.matchAll(new RegExp(pattern, 'g')));
-      for (const match of matches) {
-        const splitPoint = match.index + match[0].length;
-        if (splitPoint <= CHUNK_CONFIG.maxChunkSize - currentChunk.length && splitPoint > bestSplit) {
-          bestSplit = splitPoint;
-          bestSplitPattern = pattern;
-        }
-      }
-    }
-
-    if (bestSplit === -1) {
-      bestSplit = CHUNK_CONFIG.maxChunkSize - currentChunk.length;
-    }
-
-    const chunkText = currentChunk + remainingText.substring(0, bestSplit);
-
-    if (chunkText.trim().length >= CHUNK_CONFIG.minChunkSize) {
-      chunks.push({
-        text: chunkText,
-        index: chunkIndex,
-        startChar: text.length - remainingText.length - currentChunk.length,
-        endChar: text.length - remainingText.length + bestSplit
-      });
-      chunkIndex++;
-    }
-
-    const nextStart = Math.max(0, bestSplit - CHUNK_CONFIG.overlapSize);
-    currentChunk = remainingText.substring(nextStart, bestSplit);
-    remainingText = remainingText.substring(bestSplit);
-  }
-
-  return chunks;
-}
-
-async function getGeminiEmbedding(text) {
-  const model = genAI.getGenerativeModel({ model: "text-embedding-004" });
-  const result = await model.embedContent(text);
-  return result.embedding.values;
-}
-
-async function getGeminiEmbedding(text) {
-  const model = genAI.getGenerativeModel({ model: "text-embedding-004" });
-  const result = await model.embedContent(text);
-  return result.embedding.values;
-}
-
-
-// async function embedFiles(repoName, repoPath) {
-//   const COLLECTION_NAME = "your_collection";
-
-//   await qdrant.getCollection(COLLECTION_NAME);
-//   console.log(`Collection '${COLLECTION_NAME}' exists`);
-
-//   await qdrant.createCollection(COLLECTION_NAME, {
-//     vectors: {
-//       size: 768,
-//       distance: "Cosine"
-//     }
-//   });
-//   console.log(`Collection '${COLLECTION_NAME}' created successfully`);
-
-//   await qdrant.createPayloadIndex(COLLECTION_NAME, { field_name: "repoName", field_schema: "keyword" });
-
-//   const files = getAllFiles(repoPath);
-//   console.log(`Found ${files.length} files to embed`);
-
-//   let successCount = 0;
-//   let errorCount = 0;
-//   let totalChunks = 0;
-
-//   for (const filePath of files) {
-//     let rawContent = fs.readFileSync(filePath, "utf-8");
-//     console.log(`Processing file: ${filePath}`);
-
-//     let processedContent = rawContent;
-//     if (path.extname(filePath).toLowerCase() === '.ipynb') {
-//       console.log(`Extracting content from Jupyter notebook: ${filePath}`);
-//       processedContent = extractNotebookContent(rawContent);
-//       if (!processedContent) {
-//         console.log(`Failed to extract content from notebook: ${filePath}`);
-//         errorCount++;
-//         continue;
-//       }
-//     }
-
-//     const cleanedContent = cleanTextForEmbedding(processedContent);
-//     if (!cleanedContent) {
-//       console.log(`Skipping file with invalid content: ${filePath}`);
-//       continue;
-//     }
-
-//     const chunks = chunkText(cleanedContent, filePath);
-//     console.log(`Created ${chunks.length} chunks for ${filePath}`);
-//     totalChunks += chunks.length;
-
-//     if (chunks.length === 0) {
-//       console.log(`No chunks created for: ${filePath}`);
-//       continue;
-//     }
-
-//     for (const chunk of chunks) {
-//       const chunkText = cleanTextForEmbedding(chunk.text);
-//       if (!chunkText) {
-//         console.log(`Skipping invalid chunk ${chunk.index} in ${filePath}`);
-//         continue;
-//       }
-
-//       await new Promise(resolve => setTimeout(resolve, 100));
-
-//       const vector = await getGeminiEmbedding(chunkText);
-
-//       if (!Array.isArray(vector) || vector.length === 0) {
-//         console.error('Invalid vector received for chunk', chunk.index, 'of', filePath);
-//         errorCount++;
-//         continue;
-//       }
-
-//       const hash = crypto.createHash('sha256').update(`${filePath}_chunk_${chunk.index}`).digest('hex');
-//       const chunkId = parseInt(hash.slice(0, 12), 16);
-
-//       const upsertResult = await qdrant.upsert(COLLECTION_NAME, {
-//         points: [
-//           {
-//             id: chunkId,
-//             vector: vector,
-//             payload: {
-//               filePath: filePath,
-//               repoName: repoName,
-//               fileName: path.basename(filePath),
-//               fileExtension: path.extname(filePath),
-//               chunkIndex: chunk.index,
-//               startChar: chunk.startChar,
-//               endChar: chunk.endChar,
-//               chunkText: chunkText,
-//               totalChunks: chunks.length,
-//               fileSize: rawContent.length,
-//               chunkSize: chunkText.length,
-//               isNotebook: path.extname(filePath).toLowerCase() === '.ipynb',
-//               timestamp: new Date().toISOString()
-//             },
-//           },
-//         ],
-//       });
-
-//       console.log(`Successfully embedded chunk ${chunk.index} of ${path.basename(filePath)} (${chunkText.length} chars)`);
-//       successCount++;
-//     }
-//   }
-
-//   console.log(`Embedding complete: ${successCount} chunks successful, ${errorCount} errors, ${totalChunks} total chunks from ${files.length} files`);
-//   return { successCount, errorCount, totalFiles: files.length, totalChunks };
-// }
+// ─── EMBED FILES ──────────────────────────────────────────────────────────────
 
 async function embedFiles(repoName, repoPath) {
   const COLLECTION_NAME = "your_collection";
 
-  // -----------------------------
-  // 1. Ensure Qdrant collection exists
-  // -----------------------------
+  // 1. Ensure collection exists with correct vector size (384 for MiniLM)
   let exists = true;
   try {
     await qdrant.getCollection(COLLECTION_NAME);
     console.log(`Qdrant: Collection '${COLLECTION_NAME}' already exists.`);
   } catch (err) {
     exists = false;
-    console.log(`Qdrant: Collection '${COLLECTION_NAME}' does NOT exist. Creating...`);
   }
 
   if (!exists) {
     await qdrant.createCollection(COLLECTION_NAME, {
       vectors: {
-        size: 768, // depends on your embedding model
+        size: VECTOR_SIZE, // 384
         distance: "Cosine"
       }
     });
-    console.log(`Qdrant: Collection '${COLLECTION_NAME}' created.`);
+    console.log(`Qdrant: Collection '${COLLECTION_NAME}' created with size ${VECTOR_SIZE}.`);
   }
 
-  // Create payload index (safe even if exists)
   try {
     await qdrant.createPayloadIndex(COLLECTION_NAME, {
       field_name: "repoName",
@@ -390,80 +222,78 @@ async function embedFiles(repoName, repoPath) {
     console.log("Index already exists. Skipping.");
   }
 
-  // -----------------------------
-  // 2. Collect all text/code files
-  // -----------------------------
-  function getAllFiles(dir) {
-    let results = [];
-    const list = fs.readdirSync(dir);
-
-    for (const file of list) {
-      const fullPath = path.join(dir, file);
-      const stat = fs.statSync(fullPath);
-
-      if (stat.isDirectory()) {
-        results = results.concat(getAllFiles(fullPath));
-      } else {
-        // filter only meaningful files
-        if (!file.endsWith(".png") && !file.endsWith(".jpg") && !file.endsWith(".jpeg") && !file.endsWith(".gif")) {
-          results.push(fullPath);
-        }
-      }
-    }
-    return results;
-  }
-
+  // 2. Collect files
   const files = getAllFiles(repoPath);
   console.log(`Found ${files.length} files to embed.`);
 
-  // -----------------------------
-  // 3. Embed file contents
-  // -----------------------------
-  let points = [];
+  // 3. Embed & collect points
+  const points = [];
   for (const filePath of files) {
-    const content = fs.readFileSync(filePath, "utf8");
+    let rawContent;
+    try {
+      rawContent = fs.readFileSync(filePath, "utf8");
+    } catch (e) {
+      console.log(`Skipping unreadable file: ${filePath}`);
+      continue;
+    }
 
-    if (!content.trim()) continue;
+    let content = rawContent;
+    if (path.extname(filePath).toLowerCase() === '.ipynb') {
+      content = extractNotebookContent(rawContent) || rawContent;
+    }
 
-    // const embedding = await embedText(content);
-    //  // your custom embedding function
-    const embedding = await getGeminiEmbedding(content);
+    const cleaned = cleanTextForEmbedding(content);
+    if (!cleaned) {
+      console.log(`Skipping empty/invalid file: ${filePath}`);
+      continue;
+    }
 
+    try {
+      const embedding = await getEmbedding(cleaned);
 
-    points.push({
-      vector: embedding,
-      payload: {
-        repoName,
-        filePath: filePath.replace(repoPath + "\\", ""),
-        text: content
+      if (!Array.isArray(embedding) || embedding.length !== VECTOR_SIZE) {
+        console.error(`Invalid embedding for ${filePath}, length=${embedding?.length}`);
+        continue;
       }
-    });
+
+      points.push({
+        vector: embedding,
+        payload: {
+          repoName,
+          filePath: filePath.replace(repoPath + path.sep, ""),
+          text: cleaned
+        }
+      });
+
+      console.log(`Embedded: ${path.basename(filePath)}`);
+    } catch (embedErr) {
+      console.error(`Failed to embed ${filePath}: ${embedErr.message}`);
+    }
   }
 
-  // -----------------------------
   // 4. Upload to Qdrant
-  // -----------------------------
+  if (points.length === 0) {
+    console.warn("No valid embeddings to upload.");
+    return { totalFiles: files.length, embeddedFiles: 0 };
+  }
+
   console.log(`Uploading ${points.length} embeddings to Qdrant...`);
 
+  const baseId = Date.now();
   await qdrant.upsert(COLLECTION_NAME, {
     wait: true,
     points: points.map((p, idx) => ({
-      id: idx + Date.now(),
+      id: baseId + idx,
       vector: p.vector,
       payload: p.payload
     }))
   });
 
   console.log(`Embedding upload complete.`);
-
-  return {
-    totalFiles: files.length,
-    embeddedFiles: points.length
-  };
+  return { totalFiles: files.length, embeddedFiles: points.length };
 }
 
-
-
+// ─── ROUTES ───────────────────────────────────────────────────────────────────
 
 app.get('/api/repos', async (req, res) => {
   try {
@@ -478,50 +308,27 @@ app.get('/api/repos', async (req, res) => {
 
     for (const repoName of repoNames) {
       const repoPath = path.join(clonedReposPath, repoName);
-
       if (fs.statSync(repoPath).isDirectory()) {
         const stats = fs.statSync(repoPath);
-        const clonedDate = stats.birthtime.toISOString().split('T')[0];
-
         repos.push({
-          id: repoName.hashCode ? repoName.hashCode() : Math.random(),
+          id: repoName,
           name: repoName,
-          owner: "unknown", // You can extract from git config if needed
+          owner: "unknown",
           full_name: repoName,
-          clonedAt: clonedDate,
+          clonedAt: stats.birthtime.toISOString().split('T')[0],
           status: "active",
           path: repoPath
         });
       }
     }
 
-    // Sort by most recently cloned
     repos.sort((a, b) => new Date(b.clonedAt) - new Date(a.clonedAt));
-
     res.json({ repos });
-
   } catch (error) {
     console.error('Error fetching repos:', error);
     res.status(500).json({ error: 'Failed to fetch repositories' });
   }
 });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 app.post('/api/search', async (req, res) => {
   const { query, limit = 10, repoName = null } = req.body;
@@ -531,8 +338,7 @@ app.post('/api/search', async (req, res) => {
   }
 
   const COLLECTION_NAME = "your_collection";
-
-  const queryVector = await getGeminiEmbedding(query);
+  const queryVector = await getEmbedding(query);
 
   if (!queryVector) {
     return res.status(500).json({ message: "Failed to get query embedding" });
@@ -540,19 +346,12 @@ app.post('/api/search', async (req, res) => {
 
   let filter = {};
   if (repoName) {
-    filter = {
-      must: [
-        {
-          key: "repoName",
-          match: {
-            value: repoName
-          }
-        }
-      ]
-    };
+    filter = { must: [{ key: "repoName", match: { value: repoName } }] };
   }
 
-  await qdrant.createPayloadIndex(COLLECTION_NAME, { field_name: "repoName", field_schema: "keyword" });
+  try {
+    await qdrant.createPayloadIndex(COLLECTION_NAME, { field_name: "repoName", field_schema: "keyword" });
+  } catch (_) {}
 
   const searchResults = await qdrant.search(COLLECTION_NAME, {
     vector: queryVector,
@@ -567,14 +366,8 @@ app.post('/api/search', async (req, res) => {
     results: searchResults.map(result => ({
       score: result.score,
       filePath: result.payload.filePath,
-      fileName: result.payload.fileName,
       repoName: result.payload.repoName,
-      chunkIndex: result.payload.chunkIndex,
-      chunkText: result.payload.chunkText,
-      startChar: result.payload.startChar,
-      endChar: result.payload.endChar,
-      totalChunks: result.payload.totalChunks,
-      fileExtension: result.payload.fileExtension
+      text: result.payload.text
     }))
   });
 });
@@ -588,20 +381,44 @@ app.post('/api/clone', async (req, res) => {
   const repoName = repoUrl.split("/").pop()?.replace(".git", "") || "repo";
   const targetDir = path.join(__dirname, "cloned_repos", repoName);
 
+  if (fs.existsSync(targetDir)) {
+    fs.rmSync(targetDir, { recursive: true, force: true });
+  }
   fs.mkdirSync(path.dirname(targetDir), { recursive: true });
 
   const git = simpleGit();
-  await git.clone(repoUrl, targetDir);
-  console.log(`Repository cloned to: ${targetDir}`);
+  try {
+    let effectiveRepoUrl = repoUrl;
+    const gitToken = process.env.GIT_AUTH_TOKEN;
+    if (gitToken && repoUrl.startsWith('https://')) {
+      const encoded = encodeURIComponent(gitToken.trim());
+      effectiveRepoUrl = repoUrl.replace('https://', `https://${encoded}@`);
+    }
 
-  const embedResult = await embedFiles(repoName, targetDir);
-  console.log(`Files embedded successfully for repo: ${repoName}`);
-  res.json({
-    message: `Repo cloned to ${targetDir} and embeddings created successfully`,
-    repoName,
-    targetDir,
-    embedStats: embedResult
-  });
+    await git.clone(effectiveRepoUrl, targetDir);
+    console.log(`Repository cloned to: ${targetDir}`);
+
+    res.json({
+      message: `Repo cloned. Embedding running in background.`,
+      repoName,
+      targetDir
+    });
+
+    (async () => {
+      try {
+        const embedResult = await embedFiles(repoName, targetDir);
+        console.log(`✅ Background embedding complete for: ${repoName}`, embedResult);
+      } catch (embedErr) {
+        console.error(`❌ Background embedding failed for: ${repoName}`, embedErr.message);
+      }
+    })();
+  } catch (err) {
+    console.error('Clone error:', err.message);
+    return res.status(500).json({
+      message: 'Failed to clone repository',
+      error: err.message
+    });
+  }
 });
 
 app.post('/api/embed', async (req, res) => {
@@ -611,16 +428,12 @@ app.post('/api/embed', async (req, res) => {
   }
 
   const repoPath = path.join(__dirname, "cloned_repos", repoName);
-
   if (!fs.existsSync(repoPath)) {
     return res.status(404).json({ message: `Repository ${repoName} not found` });
   }
 
   const embedResult = await embedFiles(repoName, repoPath);
-  res.json({
-    message: "Embeddings stored in Qdrant successfully",
-    embedStats: embedResult
-  });
+  res.json({ message: "Embeddings stored successfully", embedStats: embedResult });
 });
 
 app.get('/api/test-qdrant', async (req, res) => {
@@ -632,54 +445,39 @@ app.get('/api/test-qdrant', async (req, res) => {
   });
 });
 
-app.get('/api/collection-info/:collectionName', async (req, res) => {
-  const collectionName = req.params.collectionName;
-  const info = await qdrant.getCollection(collectionName);
-  const count = await qdrant.count(collectionName);
-
-  res.json({
-    collection: collectionName,
-    info: info,
-    pointCount: count.count
-  });
-});
-
 app.get('/api/collection-info', async (req, res) => {
   const collectionName = 'your_collection';
   const info = await qdrant.getCollection(collectionName);
   const count = await qdrant.count(collectionName);
+  res.json({ collection: collectionName, info, pointCount: count.count });
+});
 
-  res.json({
-    collection: collectionName,
-    info: info,
-    pointCount: count.count
-  });
+app.get('/api/collection-info/:collectionName', async (req, res) => {
+  const collectionName = req.params.collectionName;
+  const info = await qdrant.getCollection(collectionName);
+  const count = await qdrant.count(collectionName);
+  res.json({ collection: collectionName, info, pointCount: count.count });
 });
 
 app.post('/api/test-embedding', async (req, res) => {
   const { text = "Hello world, this is a test." } = req.body;
-
-  console.log(`Testing Gemini embedding with text: "${text.substring(0, 100)}..."`);
-
-  const vector = await getGeminiEmbedding(text);
-
+  const vector = await getEmbedding(text);
   res.json({
     success: true,
     textLength: text.length,
-    vectorLength: vector ? vector.length : 0,
-    vectorSample: vector ? vector.slice(0, 5) : null,
-    provider: 'Google Gemini'
+    vectorLength: vector?.length || 0,
+    vectorSample: vector?.slice(0, 5),
+    provider: 'HuggingFace sentence-transformers/all-MiniLM-L6-v2'
   });
 });
 
-app.get('/api/test-gemini', async (req, res) => {
-  const testVector = await getGeminiEmbedding("This is a test message for Gemini embeddings");
-
+app.get('/api/test-embedding-status', async (req, res) => {
+  const testVector = await getEmbedding("This is a test message for embeddings");
   res.json({
-    status: 'Gemini API is working',
+    status: 'Embedding API is working',
     vectorLength: testVector.length,
     vectorSample: testVector.slice(0, 5),
-    hasApiKey: !!GEMINI_API_KEY
+    model: HF_MODEL
   });
 });
 
@@ -691,126 +489,79 @@ app.post('/api/solve-issue', async (req, res) => {
   try {
     const { issue, repoName = null, topK = 5 } = req.body;
 
-    // Enhanced validation with better error messages
     if (!issue) {
-      console.warn('Request missing issue field:', req.body);
-      return res.status(400).json({ 
-        message: "Issue description is required",
-        received: { issue, repoName, topK }
-      });
+      return res.status(400).json({ message: "Issue description is required" });
     }
-
     if (typeof issue !== 'string') {
-      console.warn('Issue field is not a string:', typeof issue);
-      return res.status(400).json({ 
-        message: "Issue description must be a string",
-        receivedType: typeof issue
-      });
+      return res.status(400).json({ message: "Issue description must be a string" });
     }
 
     const issueContent = issue.trim();
-    if (issueContent.length === 0) {
-      return res.status(400).json({ 
-        message: "Issue description cannot be empty"
-      });
+    if (!issueContent) {
+      return res.status(400).json({ message: "Issue description cannot be empty" });
     }
-
     if (issueContent.length > 5000) {
-      return res.status(400).json({ 
-        message: "Issue description is too long (max 5000 characters)",
-        length: issueContent.length
-      });
+      return res.status(400).json({ message: "Issue too long (max 5000 chars)" });
     }
-
-    console.log(`Processing issue: "${issueContent.substring(0, 50)}..." (${issueContent.length} chars)`);
-    console.log(`RepoName: ${repoName || 'all'}, TopK: ${topK}`);
 
     const COLLECTION_NAME = "your_collection";
 
-    // Get embedding for the issue
     let issueVector;
     try {
-      issueVector = await getGeminiEmbedding(issueContent);
+      issueVector = await getEmbedding(issueContent);
     } catch (embeddingError) {
-      console.error('Error getting embedding:', embeddingError.message);
-      return res.status(500).json({ 
+      console.error('Embedding error:', embeddingError.message);
+      return res.status(500).json({
         message: "Failed to process issue with embedding service",
         error: embeddingError.message
       });
     }
 
     if (!issueVector || !Array.isArray(issueVector) || issueVector.length === 0) {
-      console.error('Invalid embedding received:', issueVector);
-      return res.status(500).json({ 
-        message: "Failed to get embedding for issue"
-      });
+      return res.status(500).json({ message: "Failed to get embedding for issue" });
     }
 
-    console.log("✅ Issue embedding obtained, dimension:", issueVector.length);
-
-    // Build filter (remove duplicate code)
     let filter = {};
-    if (repoName && typeof repoName === 'string' && repoName.trim().length > 0) {
-      filter = {
-        must: [{ key: "repoName", match: { value: repoName.trim() } }]
-      };
-      console.log(`🔎 Filtering by repo: ${repoName}`);
+    if (repoName && typeof repoName === 'string' && repoName.trim()) {
+      filter = { must: [{ key: "repoName", match: { value: repoName.trim() } }] };
     }
 
-    console.log("🔎 Embedding dimension:", issueVector.length);
-
-    // Check if collection exists
-    let collectionExists = true;
     try {
       await qdrant.getCollection(COLLECTION_NAME);
-      console.log(`✅ Collection '${COLLECTION_NAME}' exists`);
-    } catch (error) {
-      collectionExists = false;
-      console.warn(`⚠️ Collection '${COLLECTION_NAME}' does not exist`);
-      return res.status(404).json({ 
-        message: `No repositories have been cloned yet. Please clone a repository first using the /api/clone endpoint.`,
-        hint: "Please clone a repository first from the Connect page"
+    } catch {
+      return res.status(404).json({
+        message: "No repositories cloned yet. Please clone a repository first.",
+        hint: "Use /api/clone to clone a repo"
       });
     }
 
-    // Create payload index (safe even if exists)
     try {
       await qdrant.createPayloadIndex(COLLECTION_NAME, { field_name: "repoName", field_schema: "keyword" });
-    } catch (indexError) {
-      console.log("Index creation skipped (may already exist):", indexError.message);
-    }
-
-    const searchPayload = {
-      vector: issueVector,
-      limit: topK,
-      filter: Object.keys(filter).length > 0 ? filter : undefined,
-      with_payload: true,
-      with_vector: false
-    };
-
-    console.log("🔎 Qdrant search payload:", JSON.stringify(searchPayload, null, 2));
+    } catch (_) {}
 
     let searchResults = [];
     try {
-      searchResults = await qdrant.search(COLLECTION_NAME, searchPayload);
-      console.log("✅ Raw Qdrant results:", JSON.stringify(searchResults, null, 2));
-      console.log(`✅ ${searchResults.length} results found`);
-    } catch (searchError) {
-      console.error('Error searching Qdrant:', searchError.message);
-      return res.status(500).json({
-        message: "Error searching repository context",
-        error: searchError.message
+      searchResults = await qdrant.search(COLLECTION_NAME, {
+        vector: issueVector,
+        limit: topK,
+        filter: Object.keys(filter).length > 0 ? filter : undefined,
+        with_payload: true,
+        with_vector: false
       });
+    } catch (searchError) {
+      return res.status(500).json({ message: "Error searching context", error: searchError.message });
     }
 
     if (searchResults.length === 0) {
-      return res.status(404).json({ 
-        message: "No relevant context found in the cloned repositories. Try cloning a repository related to your issue.",
-        hint: "Please clone a relevant repository from the Connect page"
+      return res.status(404).json({
+        message: "No relevant context found. Try cloning a relevant repository.",
       });
     }
 
-    const topChunks = searchResults.map(r => r.payload?.text || r.payload?.chunkText).join("\n\n---\n\n");
+    const topChunks = searchResults
+      .map(r => r.payload?.text || r.payload?.chunkText || "")
+      .filter(Boolean)
+      .join("\n\n---\n\n");
 
     const solutionResponse = await groq.chat.completions.create({
       messages: [
@@ -820,7 +571,7 @@ app.post('/api/solve-issue', async (req, res) => {
         },
         {
           role: "user",
-          content: `A user has posted the following issue:\n\n"${issueContent}"\n\nBased on the following relevant code/documentation context:\n\n${topChunks}\n\nGenerate a helpful, concise solution or steps to fix this issue.`
+          content: `Issue:\n\n"${issueContent}"\n\nRelevant context:\n\n${topChunks}\n\nProvide a concise, helpful solution.`
         }
       ],
       model: "llama-3.1-8b-instant",
@@ -829,7 +580,6 @@ app.post('/api/solve-issue', async (req, res) => {
     });
 
     const responseText = solutionResponse.choices[0]?.message?.content;
-    console.log(responseText);
 
     res.json({
       issue: issueContent,
@@ -837,22 +587,19 @@ app.post('/api/solve-issue', async (req, res) => {
       contextUsed: searchResults.map(r => ({
         score: r.score,
         filePath: r.payload.filePath,
-        chunkText: r.payload.chunkText
+        text: r.payload.text?.substring(0, 200)
       }))
     });
   } catch (error) {
     console.error('Error in /api/solve-issue:', error);
-    res.status(500).json({ 
-      message: "Internal server error while processing issue",
-      error: error.message
-    });
+    res.status(500).json({ message: "Internal server error", error: error.message });
   }
 });
 
 app.post('/send-email', async (req, res) => {
   const { name, email, message } = req.body;
 
-  const transporter = nodemailer.createTransporter({
+  const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
       user: process.env.GMAIL_USER,
@@ -860,19 +607,24 @@ app.post('/send-email', async (req, res) => {
     }
   });
 
-  const mailOptions = {
+  await transporter.sendMail({
     from: email,
     to: process.env.GMAIL_USER,
     subject: `New Contact Form Message from ${name}`,
     text: `Email: ${email}\n\nMessage:\n${message}`
-  };
+  });
 
-  await transporter.sendMail(mailOptions);
   res.status(200).json({ message: 'Message sent successfully' });
+});
+
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err?.stack || err);
+  if (res.headersSent) return next(err);
+  res.status(500).json({ message: 'Internal server error', error: err?.message || String(err) });
 });
 
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
   console.log(`Backend running on port ${PORT}`);
-  console.log(`Health check available at: http://localhost:${PORT}/health`);
+  console.log(`Health check: http://localhost:${PORT}/health`);
 });

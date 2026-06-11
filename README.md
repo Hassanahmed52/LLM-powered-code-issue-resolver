@@ -41,35 +41,67 @@ An intelligent solution that leverages Large Language Models to automatically an
 1. **Clone the repository**
    ```bash
    git clone https://github.com/Hassanahmed52/LLM-powered-code-issue-resolver.git
-   cd LLM-powered-issue-resolver
+   cd LLM-powered-code-issue-resolver
    ```
 
 2. **Install dependencies**
    ```bash
    # Install frontend dependencies
+   cd frontend
    npm install
    
-   # Install backend dependencies (if separate)
-   cd backend
+   # Install backend dependencies
+   cd ../backend
    npm install
    ```
 
+3. **Create secret config files**
+   - Copy `frontend/.env.example` to `frontend/.env.local`
+   - Copy `backend/.env.example` to `backend/.env`
 
-4. **Run the application**
+4. **Run the application locally**
    ```bash
    # Start backend server
    cd backend
    npm start
    
-   # Start frontend (in new terminal)
-   cd ../
-   npm start
+   # In another terminal, start frontend
+   cd ../frontend
+   npm run dev
    ```
 
 ##  Deployment
 
 ### Frontend (Firebase)
-### Backend (Render)
+
+1. Build and export the frontend for Firebase Hosting:
+   ```bash
+   cd frontend
+   npm run export
+   ```
+2. Deploy to Firebase Hosting:
+   ```bash
+   npm run deploy:firebase
+   ```
+   If the CLI is not installed globally, install it with `npm install -g firebase-tools` or use the local script.
+3. If you have a backend, host it separately (Cloud Run, Render, or Firebase Functions) and set `NEXT_PUBLIC_API_BASE_URL` to its public URL in `frontend/.env.local`.
+
+### Backend
+
+The backend must run on a separate Node.js host. You can deploy it to Render, Google Cloud Run, or Firebase Functions.
+
+- Put your secrets in `backend/.env` only.
+- Do not commit `backend/.env` or `frontend/.env.local` to git.
+- Use the `backend/.env.example` file as a reference.
+
+##  Secrets and config files
+
+This repository includes example environment files so you can restore secrets safely.
+
+- `frontend/.env.example` contains the public API base URL used by the frontend.
+- `backend/.env.example` contains backend keys and service URLs.
+
+When you deploy, keep the real credentials in your infrastructure's secret manager or in local `.env` files that are not committed.
 
 ##  Usage
 
