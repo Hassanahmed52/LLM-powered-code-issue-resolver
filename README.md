@@ -1,63 +1,100 @@
-# LLM-powered Issue Resolver — Deployed Instances
+# LLM-powered Issue Resolver
 
-The project is deployed and verified at the following production URLs (as requested):
+An intelligent solution that leverages Large Language Models to automatically analyze, categorize, and provide resolutions for software issues and support tickets.
 
-- Frontend (Firebase): https://llm-code-resolver.web.app
-- Backend API (Railway): https://llm-issue-resolver-production.up.railway.app
+## Live Demo
 
-This README focuses on the deployed application usage and verification steps. Local development instructions are intentionally omitted per request.
+[View Live Application](https://llm-code-resolver.web.app)
 
-## What I verified (live checks)
-- Frontend homepage loads and navigation links are present.
-- Backend `/health` responded: `{ "status": "Server is running", "timestamp": "..." }`.
-- Backend `/api/test-embedding-status` returned a sample embedding vector and confirmed embedding model connectivity.
-- Backend `/api/repos` returned at least one cloned repository (example: `CineSpot`).
-- Backend `/api/solve-issue` returned an LLM-generated solution for a simple test issue.
+## Features
 
-All checks were performed against the deployed endpoints on 2026-06-11.
+* **Intelligent Issue Analysis:** Automatically analyzes source code context and repositories using advanced LLM processing.
+* **Smart Resolution Suggestions:** Provides context-aware solutions and actionable recommendations based on the codebase.
+* **Vector-Driven Search:** Uses Qdrant vector database and embeddings to efficiently map and query relevant code snippets.
+* **User Authentication:** Secure user sign-in and account management powered by Clerk and Firebase.
+* **Responsive Design:** A seamless, dynamic UI that works perfectly across both desktop and mobile devices.
 
-## How to use the deployed app
+## Tech Stack
 
-1. Open the frontend in your browser:
+### Frontend
 
-	https://llm-code-resolver.web.app
+* **Framework:** Next.js (React 19)
+* **Hosting:** Firebase Hosting
+* **Authentication:** Clerk / Firebase Auth
+* **Styling:** Tailwind CSS / Framer Motion
 
-2. Sign in or sign up (if required by the app) and go to the **Connect** page.
-	- Paste a public GitHub repository HTTPS URL and click **Clone Repo**.
-	- After cloning, you should be redirected to the **Issue** page.
+### Backend
 
-3. On the **Issue** page:
-	- Select the cloned repository (from the repo list).
-	- Enter a short issue description and submit.
-	- You will be shown a generated solution on the **Solution** page.
+* **Runtime:** Node.js (v22.x)
+* **Framework:** Express.js
+* **Vector DB:** Qdrant Client
+* **Deployment:** Railway
+* **LLM Integration:** Google Generative AI (Gemini) / Groq SDK / Transformers.js
 
-## Quick API checks (curl)
-Use these commands to verify the deployed backend manually:
+## Installation & Setup
 
+### Prerequisites
+
+* Node.js (v22.x or higher)
+* npm or yarn
+* Firebase and Clerk accounts
+* Gemini API Key / Groq API Key
+
+### Local Development
+
+1. **Clone the repository**
 ```bash
-# Health
-curl -sS https://llm-issue-resolver-production.up.railway.app/health
+git clone https://github.com/Hassanahmed52/LLM-powered-issue-resolver.git
+cd LLM-powered-issue-resolver
 
-# Embedding test
-curl -sS https://llm-issue-resolver-production.up.railway.app/api/test-embedding-status
-
-# Repo list
-curl -sS https://llm-issue-resolver-production.up.railway.app/api/repos
-
-# Solve an issue (example)
-curl -sS -X POST https://llm-issue-resolver-production.up.railway.app/api/solve-issue \
-  -H "Content-Type: application/json" \
-  -d '{"issue":"How to run the project","repoName":"CineSpot","topK":3}'
 ```
 
-## Troubleshooting (deployed)
 
-- If `/api/test-embedding-status` returns an error, check provider quotas (OpenAI/Groq) and whether the backend has valid API keys configured in Railway environment variables.
-- If cloning fails for a repo, the backend will return the clone error; verify the provided repo URL is public or that the backend has a valid `GIT_AUTH_TOKEN` configured in Railway for private repos.
-- If the `/api/solve-issue` request returns `429`, the backend has rate-limit retry logic; retry after a short wait or check your LLM provider usage quota.
 
-## Notes
+```
 
-- I verified the live deployment responses on 2026-06-11. The service is live and responds to the primary flows (clone → list → solve). If you want, I can add a short automated smoke-test script under `/scripts` to run these checks programmatically.
+2. **Install dependencies**
+   ```bash
+   # Install frontend dependencies
+   cd frontend
+   npm install
 
-If you'd like the README adjusted further (remove local instructions entirely, add API contract details, or add automated checks), tell me which format you prefer and I'll update it.
+   # Install backend dependencies
+   cd ../backend
+   npm install
+
+```
+
+3. **Run the application**
+```bash
+# Start backend server
+cd backend
+npm start
+
+# Start frontend (in a new terminal)
+cd ../frontend
+npm run dev
+
+```
+
+
+
+```
+
+## Deployment
+
+### Frontend (Firebase)
+* Deployed using Firebase Hosting tools.
+* Command: `npm run deploy:firebase`
+
+### Backend (Railway)
+* Deployed continuously via Railway linked directly to the repository production branch.
+
+## Usage
+
+1. **Sign Up/Login:** Create an account or log in securely through the authentication interface.
+2. **Connect Repository:** Provide a public GitHub repository link to clone and vectorize the codebase context.
+3. **Submit Issue:** Input your technical issue, error log, or support ticket details.
+4. **View Solutions:** Receive intelligent, step-by-step resolution steps and code fixes generated by the LLM.
+
+```
